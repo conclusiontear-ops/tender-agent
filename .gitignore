@@ -1,5 +1,11 @@
-output/*.docx
-output/*.bat
+﻿output/
 __pycache__/
 *.pyc
+*.pyo
 .env
+*.docx
+*.zip
+*.msi
+*.exe
+*.user.js
+*.winmd

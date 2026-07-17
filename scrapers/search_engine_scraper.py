@@ -84,6 +84,9 @@ class SearchEngineScraper(BaseScraper):
     def _search_one(self, engine, query):
         url = engine["url"].format(query=urllib.parse.quote(query))
         time.sleep(random.uniform(0.5, 1.5))  # 错开请求
+        if not self.check_robots_allowed(url):
+            logger.info(f"{engine['name']}: blocked by robots.txt, skipping")
+            return []
         try:
             page = self._get_page(url, timeout=15)
         except Exception:

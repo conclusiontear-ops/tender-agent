@@ -1,5 +1,26 @@
-anthropic>=0.40.0
-python-docx>=1.1.0
-requests>=2.31.0
-beautifulsoup4>=4.12.0
-schedule>=1.2.0
+# 招标信息聚合工具依赖列表
+# 版本已锁定以确保可重复部署
+
+# LLM 和大模型相关
+anthropic==0.40.0
+
+# Word 文档生成
+python-docx==1.1.0
+
+# HTTP 请求和网络相关
+requests==2.31.0
+scrapling>=0.1.0
+
+# HTML 解析
+beautifulsoup4==4.12.0
+lxml>=4.9.0
+
+# Web 框架
+flask==2.3.0
+
+# 定时调度
+schedule==1.2.0
+
+python-dotenv>=1.0.0
+tenacity>=8.0.0
+

@@ -14,6 +14,7 @@ import time
 import json
 import logging
 import argparse
+import re
 import subprocess
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -23,6 +24,7 @@ from typing import List
 sys.path.insert(0, str(Path(__file__).parent))
 
 import schedule
+import threading
 from concurrent.futures import ThreadPoolExecutor, TimeoutError
 
 from intent_parser import IntentParser, TenderQuery
@@ -64,6 +66,7 @@ def run_once(user_input: str, query: TenderQuery = None, api_key: str = None) ->
     :param query: 已解析的查询参数（可选，不传则重新解析）
     :return: 生成的 Word 文件路径
     """
+    _t0 = time.time()
     # 1. 意图解析
     if query is None:
         parser = IntentParser(api_key=api_key)
@@ -91,9 +94,10 @@ def run_once(user_input: str, query: TenderQuery = None, api_key: str = None) ->
             remaining = deadline - _time.time()
             if remaining <= 0:
                 logger.warning(f"  {scraper.site_name} 总超时，跳过")
+                future.cancel()
                 continue
             try:
-                items = future.result(timeout=max(5, remaining))
+                items = future.result(timeout=min(remaining, 30))
                 all_items.extend(items)
                 logger.info(f"  {scraper.site_name} -> {len(items)} 条")
             except TimeoutError:
@@ -109,7 +113,7 @@ def run_once(user_input: str, query: TenderQuery = None, api_key: str = None) ->
             seen_urls.add(item.source_url)
             deduped.append(item)
 
-        logger.info(f"去重后共 {len(deduped)} 条 (原始 {len(all_items)} 条)")
+    logger.info(f"去重后共 {len(deduped)} 条 (原始 {len(all_items)} 条)")
 
     if not deduped:
         logger.info("真实网站未抓取到数据，使用演示数据展示流程")
@@ -135,7 +139,8 @@ def run_once(user_input: str, query: TenderQuery = None, api_key: str = None) ->
         for item in deduped
     ]
 
-    result_path = generate_report(records, user_input, str(output_path))
+    elapsed = time.time() - _t0
+    result_path = generate_report(records, user_input, str(output_path), elapsed_sec=elapsed)
     logger.info(f"报告已生成: {result_path}")
     return result_path
 
@@ -191,7 +196,7 @@ def _demo_items(user_input, query):
     ]
 
 
-def run_scheduled(user_input: str):
+def run_scheduled(user_input: str, api_key: str = None):
     """
     注册定时任务并保持运行
     """
@@ -243,7 +248,7 @@ def run_scheduled(user_input: str):
         logger.info("定时任务已停止")
 
 
-def start_web_ui(host: str = "0.0.0.0", port: int = 5000):
+def start_web_ui(host: str = "127.0.0.1", port: int = 5000):
     """启动 Web UI (Flask)"""
     try:
         from flask import Flask, render_template_string, request, send_file
@@ -452,7 +457,9 @@ def start_web_ui(host: str = "0.0.0.0", port: int = 5000):
     @app.route("/api/generate", methods=["POST"])
     def api_generate():
         data = request.get_json()
-        user_input = data.get("query", "").strip(); api_key = data.get("api_key", "").strip() or None
+        user_input = data.get("query", "").strip()
+        # Security: read API key from environment variable
+        api_key = os.getenv("ANTHROPIC_API_KEY")
         if not user_input:
             return {"success": False, "error": "请输入查询内容"}
 
@@ -483,6 +490,7 @@ def start_web_ui(host: str = "0.0.0.0", port: int = 5000):
 
     # ---- 定时任务管理 ----
     scheduled_jobs = {}
+    jobs_lock = threading.Lock()
 
     @app.route("/api/schedule/start", methods=["POST"])
     def api_schedule_start():
@@ -495,7 +503,8 @@ def start_web_ui(host: str = "0.0.0.0", port: int = 5000):
 
         # 清除旧任务
         schedule.clear()
-        scheduled_jobs.clear()
+        with jobs_lock:
+            scheduled_jobs.clear()
 
         def job():
             logger.info(f"[定时任务] {datetime.now()}: {q}")
@@ -510,17 +519,19 @@ def start_web_ui(host: str = "0.0.0.0", port: int = 5000):
         else:
             schedule.every().monday.at(t).do(job)
 
-        scheduled_jobs["active"] = True
+        with jobs_lock:
+            scheduled_jobs["active"] = True
 
         # 在后台线程跑 schedule
         def run_schedule_loop():
-            while scheduled_jobs.get("active"):
+            while True:
+                with jobs_lock:
+                    if not scheduled_jobs.get('active'):
+                        break
                 schedule.run_pending()
                 time.sleep(30)
-
-        import threading
-        t = threading.Thread(target=run_schedule_loop, daemon=True)
-        t.start()
+        sched_thread = threading.Thread(target=run_schedule_loop, daemon=True)
+        sched_thread.start()
 
         return {"success": True, "msg": f"已启动: 每{freq} {t} 搜「{q}」"}
 
@@ -533,17 +544,19 @@ def start_web_ui(host: str = "0.0.0.0", port: int = 5000):
         if not q:
             return {"success": False, "error": "请输入查询词"}
 
-        task_name = f"TenderAgent_{q[:10].replace(' ','_')}"
+        safe_q = re.sub(r"[^\w一-鿿\s]", "", q)[:20]
+        task_name = f"TenderAgent_{safe_q.replace(' ','_')}"
         python_path = sys.executable
         script_path = os.path.join(os.path.dirname(__file__), "main.py")
         h, m = t.split(":")
 
         # 生成 .bat 脚本
+        bat_safe_q = q.replace('"', '""')  # Windows batch escape
         bat_content = f'''@echo off
 chcp 65001 >nul
 cd /d "{os.path.dirname(__file__)}"
-echo [%date% %time%] TenderAgent: {q}
-"{python_path}" "{script_path}" -i "{q}" -m cli
+echo [%date% %time%] TenderAgent: {bat_safe_q}
+"{python_path}" "{script_path}" -i "{bat_safe_q}" -m cli
 echo Done. Report saved to output\
 '''
         bat_path = os.path.join(OUTPUT_DIR, f"scheduled_{task_name}.bat")
@@ -552,8 +565,9 @@ echo Done. Report saved to output\
 
         # 尝试创建 Windows 定时任务
         exe_cmd = f'cmd /c "{bat_path}"'
+        sc_param = 'WEEKLY' if freq == 'weekly' else 'DAILY'
         cmd = (
-            f'schtasks /Create /SC DAILY /ST {h}:{m} /TN "{task_name}" '
+            f'schtasks /Create /SC {sc_param} /ST {h}:{m} /TN "{task_name}" '
             f'/TR "{exe_cmd}" /F'
         )
         try:
@@ -561,8 +575,8 @@ echo Done. Report saved to output\
             if result.returncode == 0:
                 msg = f"已创建Windows定时任务: 每天 {t} 自动执行。关闭浏览器不受影响。"
                 return {"success": True, "name": task_name, "msg": msg}
-        except:
-            pass
+        except Exception as e:
+            logger.warning(f'schtasks failed: {e}')
 
         # schtasks 失败：退回手动方案
         msg = (f"定时任务脚本已生成。请右键点击下方文件→以管理员身份运行 来注册:\n"
@@ -574,7 +588,8 @@ echo Done. Report saved to output\
     @app.route("/api/schedule/stop", methods=["POST"])
     def api_schedule_stop():
         schedule.clear()
-        scheduled_jobs.clear()
+        with jobs_lock:
+            scheduled_jobs.clear()
         return {"success": True, "msg": "已停止"}
 
     logger.info(f"Web UI 启动: http://{host}:{port}")
@@ -627,3 +642,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

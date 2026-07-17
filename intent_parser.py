@@ -93,6 +93,12 @@ FREQ_MAP = {
     "每小时": "hourly", "每分钟": "minutely",
 }
 
+# frequency exclude list - prevent false positives like 'today' matching 'daily'
+FREQ_EXCLUDE = {
+    "今天天气", "明天天气", "聊天", "聊天记录",
+    "春天", "夏天", "秋天", "冬天", "蓝天", "阴天", "雨天",
+}
+
 import anthropic
 
 
@@ -131,6 +137,27 @@ class TenderQuery:
 
 class SimpleParser:
     """规则引擎解析器——无需API Key，纯本地正则匹配"""
+
+    # tender-related keywords for relevance check
+    TENDER_KEYWORDS = [
+        "招标", "投标", "中标", "采购", "公告", "公示", "询价", "竞价",
+        "竞争性磋商", "竞争性谈判", "公开招标", "邀请招标", "单一来源",
+        "招投标", "标讯", "标书", "开标", "评标",
+    ]
+
+    def _has_tender_relevance(self, text, region, industry, has_schedule):
+        """Relevance check: return True if input appears related to tender search."""
+        if region or industry or has_schedule:
+            return True
+        for kw in self.TENDER_KEYWORDS:
+            if kw in text:
+                return True
+        if len(text) < 5:
+            return False
+        action_words = ["找", "查", "搜", "搜索", "检索"]
+        if any(w in text for w in action_words) and len(text) >= 5:
+            return True
+        return False
     
     def parse(self, user_input: str) -> TenderQuery:
         text = user_input
@@ -198,12 +225,17 @@ class SimpleParser:
         
         time_pattern = re.search(r'(?:每[天日周]|每天|每周)?\s*(?:早上|上午|中午|下午|晚上|早晨)?\s*(\d{1,2})\s*(?:点|:)(?:\s*(\d{2}))?', text)
         freq_found = None
+        _freq_text = text
+        for excl in sorted(FREQ_EXCLUDE, key=len, reverse=True):
+            if excl in _freq_text:
+                _freq_text = _freq_text.replace(excl, " " * len(excl))
         for key, val in FREQ_MAP.items():
-            if key in text:
+            if key in _freq_text:
                 freq_found = val
                 break
         
-        if time_pattern or freq_found or '定时' in text or '推送' in text:
+        has_schedule = bool(time_pattern or freq_found or '定时' in text or '推送' in text)
+        if has_schedule:
             trigger_mode = "scheduled"
             if time_pattern:
                 h = time_pattern.group(1).zfill(2)
@@ -215,6 +247,13 @@ class SimpleParser:
         elif '立即' in text or '马上' in text or '现在' in text or '快速' in text:
             trigger_mode = "immediate"
         
+
+        # relevance check: reject irrelevant input
+        if not self._has_tender_relevance(text, region, industry, has_schedule):
+            raise ValueError(
+                "无法识别有效的查询意图，请描述您要查找的招标信息（地区、行业、时间等），例如："
+                "帮我找最近一周北京地区建筑类招标"
+            )
         return TenderQuery(
             region=region,
             industry=industry,
@@ -226,8 +265,6 @@ class SimpleParser:
             schedule_freq=schedule_freq,
         )
 
-
-        return asdict(self)
 
 
 class IntentParser:
