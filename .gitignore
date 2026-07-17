@@ -1,0 +1,5 @@
+output/*.docx
+output/*.bat
+__pycache__/
+*.pyc
+.env
