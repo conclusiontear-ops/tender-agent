@@ -141,8 +141,8 @@ def _generate_ai_summary(total, sources, regions, industries, amount_buckets,
         lines.append(f"从地区来看，{top_reg[0]} 地区采购活跃度最高（{top_reg[1]}条），是当前关注重点。")
     
     # 综合建议一句
-    lines.append("建议投标方重点关注预算300万元以上、发布时间在3天以内的项目，提前准备投标材料。")
-    lines.append("建议投标方重点关注预算300万元以上、发布时间在3天以内的项目，提前准备投标材料。")
+    if high_val or mid_val or recent_3d:
+        lines.append("建议投标方重点关注预算300万元以上、发布时间在3天以内的项目，提前准备投标材料。")
     
     return "\n\n".join(lines)
 
